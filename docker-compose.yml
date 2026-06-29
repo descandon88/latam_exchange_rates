@@ -1,0 +1,217 @@
+# docker-compose.yml
+services:
+  # PostgreSQL (both Airflow metadata + data warehouse)
+  postgres:
+    image: postgres:15-alpine
+    container_name: py_uy_postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow_network
+
+  # Redis (Celery broker for distributed tasks)
+  redis:
+    image: redis:7-alpine
+    container_name: py_uy_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow_network
+
+  # One-off: migrate the metadata DB schema and create the admin user.
+  # Webserver/scheduler/worker only run "airflow webserver/scheduler/..." directly,
+  # which does NOT create tables or users by itself - this service does that once.
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: py_uy_airflow_init
+    environment:
+      AIRFLOW_HOME: /home/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /home/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      PYTHONPATH: /home/airflow
+    volumes:
+      - ./airflow/dags:/home/airflow/dags
+      - ./airflow/plugins:/home/airflow/plugins
+      - ./airflow/logs:/home/airflow/logs
+      - ./src:/home/airflow/src
+    command: >
+      bash -c "airflow db migrate &&
+               airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow_network
+
+  # Airflow Webserver
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: py_uy_airflow_web
+    environment:
+      AIRFLOW_HOME: /home/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /home/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__PARALLELISM: 4
+      AIRFLOW__CORE__DAG_CONCURRENCY: 2
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 1
+      PYTHONPATH: /home/airflow
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/home/airflow/dags
+      - ./airflow/plugins:/home/airflow/plugins
+      - ./airflow/logs:/home/airflow/logs
+      - ./src:/home/airflow/src
+    command: airflow webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow_network
+    healthcheck:
+      test: [ "CMD-SHELL", "airflow version" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Airflow Scheduler
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: py_uy_airflow_scheduler
+    environment:
+      AIRFLOW_HOME: /home/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /home/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      PYTHONPATH: /home/airflow
+    volumes:
+      - ./airflow/dags:/home/airflow/dags
+      - ./airflow/plugins:/home/airflow/plugins
+      - ./airflow/logs:/home/airflow/logs
+      - ./src:/home/airflow/src
+    command: airflow scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow_network
+    healthcheck:
+      test: [ "CMD-SHELL", "airflow dag list" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Celery Worker
+  airflow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: py_uy_airflow_worker
+    environment:
+      AIRFLOW_HOME: /home/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /home/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      PYTHONPATH: /home/airflow
+    volumes:
+      - ./airflow/dags:/home/airflow/dags
+      - ./airflow/plugins:/home/airflow/plugins
+      - ./airflow/logs:/home/airflow/logs
+      - ./src:/home/airflow/src
+    command: airflow celery worker -q default
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow_network
+
+  # One-off: smoke-test the real BCU SOAP extractor in isolation, without
+  # spinning up the full Airflow stack (it needs network egress to
+  # cotizaciones.bcu.gub.uy, nothing else). Run with:
+  #   docker compose run --rm bcu-extractor
+  # or override the command to run its tests instead:
+  #   docker compose run --rm bcu-extractor python -m pytest tests/test_bcu_extractor.py -v
+  bcu-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: py_uy_bcu_extractor
+    environment:
+      PYTHONPATH: /home/airflow
+    volumes:
+      - ./src:/home/airflow/src
+      - ./scripts:/home/airflow/scripts
+      - ./tests:/home/airflow/tests
+    working_dir: /home/airflow
+    command: python scripts/check_bcu.py
+    profiles:
+      - debug
+    networks:
+      - airflow_network
+
+  # pgAdmin (for DB inspection)
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: py_uy_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - airflow_network
+
+volumes:
+  postgres_data:
+
+networks:
+  airflow_network:
+    driver: bridge

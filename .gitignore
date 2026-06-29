@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Airflow runtime output (logs, scheduler symlinks, generated config)
+airflow/logs/
+airflow/plugins/__pycache__/
+
+# Env / secrets
+.env
+.venv/
+venv/
+
+# Editor/OS
+.vscode/
+.DS_Store
